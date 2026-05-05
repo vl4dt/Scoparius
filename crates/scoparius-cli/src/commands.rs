@@ -8,6 +8,7 @@ use scoparius_core::cleaner::Cleaner;
 use scoparius_core::platform;
 use std::path::PathBuf;
 use crate::output;
+use crate::tui;
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -104,6 +105,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Launch interactive dashboard (TUI)
+    Dash,
 }
 
 #[derive(Subcommand)]
@@ -344,6 +348,9 @@ pub async fn run(
             ConfigAction::Path => println!("{}", ScopariusConfig::default_path().display()),
             ConfigAction::Init => { config.save()?; eprintln!("✅ Config saved to {}", ScopariusConfig::default_path().display()); }
         },
+        Commands::Dash => {
+            tui::run(config).await?;
+        }
     }
     Ok(())
 }

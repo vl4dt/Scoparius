@@ -26,8 +26,10 @@ pub struct ScanConfig {
     pub min_size: u64,
     /// Number of parallel threads for walking.
     pub parallelism: usize,
-    /// Additional paths to exclude from scanning.
+    /// Paths/patterns to exclude.
     pub exclude_patterns: Vec<String>,
+    /// Enable content hashing during scan.
+    pub enable_hashing: bool,
 }
 
 impl Default for ScanConfig {
@@ -40,6 +42,7 @@ impl Default for ScanConfig {
             min_size: 0,
             parallelism: num_cpus(),
             exclude_patterns: Vec::new(),
+            enable_hashing: false,
         }
     }
 }
@@ -102,6 +105,11 @@ impl Scanner {
             result.entries.extend(entries);
         }
 
+        // Pass 2: Optional Content Hashing
+        if self.config.enable_hashing {
+            self.perform_hashing(&mut result, &progress_tx).await?;
+        }
+
         result.total_files = files_count.load(Ordering::Relaxed);
         result.total_dirs = dirs_count.load(Ordering::Relaxed);
         result.total_size = bytes_count.load(Ordering::Relaxed);
@@ -112,8 +120,7 @@ impl Scanner {
 
         if let Some(tx) = &progress_tx {
             let _ = tx.send(ProgressEvent::ScanCompleted {
-                total_files: result.total_files,
-                total_size: result.total_size,
+                result: result.clone(),
                 duration_ms,
             });
         }
@@ -250,6 +257,55 @@ impl Scanner {
             .exclude_patterns
             .iter()
             .any(|pattern| path_str.contains(pattern.as_str()))
+    }
+
+    /// Perform a hashing pass on candidate duplicates (same size).
+    async fn perform_hashing(
+        &self,
+        result: &mut ScanResult,
+        progress_tx: &Option<mpsc::UnboundedSender<ProgressEvent>>,
+    ) -> Result<()> {
+        use crate::analyzer::duplicates;
+        use std::collections::HashMap;
+
+        // Group by size to find hashing candidates (only groups with 2+ files)
+        let mut size_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (idx, entry) in result.entries.iter().enumerate() {
+            if !entry.is_dir && entry.size > 0 {
+                size_groups.entry(entry.size).or_default().push(idx);
+            }
+        }
+
+        let candidates: Vec<usize> = size_groups
+            .into_iter()
+            .filter(|(_, indices)| indices.len() >= 2)
+            .flat_map(|(_, indices)| indices)
+            .collect();
+
+        let total_to_hash = candidates.len() as u64;
+        let mut files_hashed = 0u64;
+
+        for &idx in &candidates {
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let entry = &mut result.entries[idx];
+            let _ = duplicates::hash_entry(entry);
+            
+            files_hashed += 1;
+            if files_hashed % 10 == 0 || files_hashed == total_to_hash {
+                if let Some(tx) = progress_tx {
+                    let _ = tx.send(ProgressEvent::HashProgress {
+                        files_hashed,
+                        total_to_hash,
+                        current_path: entry.path.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

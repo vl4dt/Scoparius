@@ -107,6 +107,10 @@ pub struct ScannerConfig {
     /// Paths/patterns to exclude.
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+
+    /// Enable content hashing during scan (required for duplicate detection).
+    #[serde(default)]
+    pub enable_hashing: bool,
 }
 
 impl Default for ScannerConfig {
@@ -118,6 +122,7 @@ impl Default for ScannerConfig {
             min_size: 0,
             parallelism: 0, // 0 = auto-detect
             exclude_patterns: Vec::new(),
+            enable_hashing: false,
         }
     }
 }

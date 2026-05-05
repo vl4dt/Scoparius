@@ -5,6 +5,7 @@
 pub mod duplicates;
 pub mod orphans;
 pub mod cloud;
+pub mod registry;
 
 use crate::config::ThresholdConfig;
 use crate::models::{FileCategory, FileEntry, RiskLevel, ScanResult};

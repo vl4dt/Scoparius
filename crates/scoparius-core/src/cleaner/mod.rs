@@ -122,6 +122,43 @@ impl Cleaner {
                 }
                 Ok(())
             }
+            CleanOperation::DeleteRegistryKey => {
+                #[cfg(windows)]
+                {
+                    let key_path = action.path.to_string_lossy().to_string();
+                    let quarantine_dir = self.config.general.quarantine_dir.clone()
+                        .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("quarantine"));
+                    std::fs::create_dir_all(&quarantine_dir).map_err(|e| ScopariusError::io(&quarantine_dir, e))?;
+                    
+                    let safe_name = key_path.replace('\\', "_").replace('/', "_");
+                    let reg_file = quarantine_dir.join(format!("{}_{}.reg", action.id, safe_name));
+                    
+                    // Export key to .reg file
+                    let export_status = std::process::Command::new("reg.exe")
+                        .args(&["export", &key_path, &reg_file.to_string_lossy().to_string(), "/y"])
+                        .status()
+                        .map_err(|e| ScopariusError::Cleaner(format!("Failed to run reg.exe export: {}", e)))?;
+                        
+                    if !export_status.success() {
+                        return Err(ScopariusError::Cleaner(format!("Failed to export registry key: {}", key_path)));
+                    }
+                    
+                    // Delete the key
+                    let delete_status = std::process::Command::new("reg.exe")
+                        .args(&["delete", &key_path, "/f"])
+                        .status()
+                        .map_err(|e| ScopariusError::Cleaner(format!("Failed to run reg.exe delete: {}", e)))?;
+                        
+                    if !delete_status.success() {
+                        return Err(ScopariusError::Cleaner(format!("Failed to delete registry key: {}", key_path)));
+                    }
+                    Ok(())
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(ScopariusError::Cleaner("Registry operations are only supported on Windows".to_string()))
+                }
+            }
         }
     }
 
@@ -261,6 +298,27 @@ impl Cleaner {
                     // Cleanup quarantine zip after successful restore
                     let _ = std::fs::remove_file(&zip_path);
                     restored += 1;
+                }
+            } else if action.operation == CleanOperation::DeleteRegistryKey {
+                #[cfg(windows)]
+                {
+                    let key_path = action.path.to_string_lossy().to_string();
+                    let safe_name = key_path.replace('\\', "_").replace('/', "_");
+                    let reg_file = quarantine_dir.join(format!("{}_{}.reg", action.id, safe_name));
+                    
+                    if reg_file.exists() {
+                        let status = std::process::Command::new("reg.exe")
+                            .args(&["import", &reg_file.to_string_lossy().to_string()])
+                            .status()
+                            .map_err(|e| ScopariusError::Cleaner(format!("Failed to run reg.exe import: {}", e)))?;
+                            
+                        if status.success() {
+                            let _ = std::fs::remove_file(&reg_file);
+                            restored += 1;
+                        } else {
+                            tracing::error!("Failed to restore registry key: {}", key_path);
+                        }
+                    }
                 }
             }
         }

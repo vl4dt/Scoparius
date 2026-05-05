@@ -2,6 +2,7 @@
 
 mod commands;
 mod output;
+mod tui;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;

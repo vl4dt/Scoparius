@@ -50,6 +50,7 @@ pub enum FileCategory {
     PackageManagerCache,
     OsJunk,
     CloudSyncConflict,
+    Registry,
     Custom(u32),
 }
 
@@ -70,6 +71,7 @@ impl FileCategory {
             Self::PackageManagerCache => "Package Manager Cache",
             Self::OsJunk => "OS Junk Files",
             Self::CloudSyncConflict => "Cloud Sync Conflicts",
+            Self::Registry => "Registry Entries",
             Self::Custom(_) => "Custom",
         }
     }
@@ -90,6 +92,7 @@ impl FileCategory {
             Self::PackageManagerCache => 30,
             Self::OsJunk => 7,
             Self::CloudSyncConflict => 14,
+            Self::Registry => 0,
             Self::Custom(_) => 30,
         }
     }
@@ -248,12 +251,14 @@ pub struct CleanAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanOperation {
-    /// Permanently delete file/directory.
+    /// Permanently delete the file/directory.
     Delete,
     /// Move to OS trash/recycle bin.
     Trash,
-    /// Compress file to save space.
+    /// Move to quarantine archive.
     Compress,
+    /// Delete a registry key (Windows only).
+    DeleteRegistryKey,
 }
 
 /// Status of a cleanup action.
@@ -349,8 +354,7 @@ pub enum ProgressEvent {
     ScanError { path: PathBuf, error: String },
     /// Scan completed.
     ScanCompleted {
-        total_files: u64,
-        total_size: u64,
+        result: ScanResult,
         duration_ms: u64,
     },
     /// Cleanup progress.
@@ -365,5 +369,11 @@ pub enum ProgressEvent {
         total_freed: u64,
         actions_completed: usize,
         actions_failed: usize,
+    },
+    /// Duplicate hashing progress.
+    HashProgress {
+        files_hashed: u64,
+        total_to_hash: u64,
+        current_path: PathBuf,
     },
 }

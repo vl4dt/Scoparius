@@ -19,14 +19,17 @@ pub fn print_progress_event(event: &ProgressEvent) {
                 truncate_path(current_path, 50),
             );
         }
-        ProgressEvent::ScanCompleted { total_files, total_size, duration_ms } => {
+        ProgressEvent::ScanCompleted { result, duration_ms } => {
             eprintln!("\r{}", " ".repeat(120));
             eprintln!("  {} {} files ({}) in {:.1}s",
                 "✓".green().bold(),
-                total_files,
-                ByteSize(*total_size),
+                result.total_files,
+                ByteSize(result.total_size),
                 *duration_ms as f64 / 1000.0,
             );
+        }
+        ProgressEvent::HashProgress { files_hashed, total_to_hash, .. } => {
+            eprint!("\r  {} Hashing: {}/{}", "⚡".magenta(), files_hashed, total_to_hash);
         }
         ProgressEvent::CleanProgress { action_index, total_actions, current_path, .. } => {
             eprint!("\r  [{}/{}] {}", action_index + 1, total_actions, truncate_path(current_path, 60));
