@@ -1,0 +1,20 @@
+[rule]
+name = "old-downloads"
+description = "Old installer and archive files in Downloads folder"
+category = "temp"
+risk = "medium"
+
+[[rule.targets]]
+platform = "windows"
+paths = ["~/Downloads"]
+extensions = ["exe", "msi", "msix", "appx"]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["~/Downloads"]
+extensions = ["deb", "rpm", "AppImage", "snap", "flatpakref"]
+
+[[rule.targets]]
+platform = "macos"
+paths = ["~/Downloads"]
+extensions = ["dmg", "pkg"]

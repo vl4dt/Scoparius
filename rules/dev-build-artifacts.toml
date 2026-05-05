@@ -1,0 +1,37 @@
+[rule]
+name = "dev-build-artifacts"
+description = "Development build artifacts and caches"
+category = "build_artifact"
+risk = "medium"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "~/*/target",
+    "~/*/node_modules",
+    "~/*/__pycache__",
+    "~/*/.gradle/caches",
+    "~/*/.next",
+    "~/*/.nuxt",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = [
+    "~/*/target",
+    "~/*/node_modules",
+    "~/*/__pycache__",
+    "~/*/.gradle/caches",
+    "~/*/.next",
+    "~/*/.nuxt",
+]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/*/target",
+    "~/*/node_modules",
+    "~/*/__pycache__",
+    "~/*/.gradle/caches",
+    "~/Library/Developer/Xcode/DerivedData",
+]

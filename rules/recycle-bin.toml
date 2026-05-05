@@ -1,0 +1,17 @@
+[rule]
+name = "recycle-bin"
+description = "Items in the OS recycle bin / trash"
+category = "os_junk"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = ["C:/$Recycle.Bin"]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["~/.local/share/Trash"]
+
+[[rule.targets]]
+platform = "macos"
+paths = ["~/.Trash"]

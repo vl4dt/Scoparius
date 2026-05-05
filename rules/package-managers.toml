@@ -1,0 +1,50 @@
+[rule]
+name = "package-managers"
+description = "Package manager caches across languages and ecosystems"
+category = "cache"
+risk = "low"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "~/.cargo/registry/cache",
+    "~/.cargo/registry/src",
+    "{LOCALAPPDATA}/pip/cache",
+    "{LOCALAPPDATA}/yarn/Cache",
+    "{APPDATA}/npm-cache",
+    "~/.gradle/caches",
+    "~/.m2/repository",
+    "~/.nuget/packages",
+    "{LOCALAPPDATA}/NuGet/Cache",
+    "~/.conda/pkgs",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = [
+    "~/.cargo/registry/cache",
+    "~/.cargo/registry/src",
+    "~/.cache/pip",
+    "~/.cache/yarn",
+    "~/.npm/_cacache",
+    "~/.gradle/caches",
+    "~/.m2/repository",
+    "~/.conda/pkgs",
+    "~/.cache/go-build",
+    "/var/cache/apt/archives",
+    "/var/cache/pacman/pkg",
+]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/.cargo/registry/cache",
+    "~/.cargo/registry/src",
+    "~/Library/Caches/pip",
+    "~/Library/Caches/Yarn",
+    "~/.npm/_cacache",
+    "~/.gradle/caches",
+    "~/.m2/repository",
+    "~/Library/Caches/Homebrew",
+    "~/.conda/pkgs",
+]

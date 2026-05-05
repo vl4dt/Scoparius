@@ -1,0 +1,20 @@
+[rule]
+name = "cloud-sync-conflicts"
+description = "Cloud sync conflict and duplicate files from OneDrive, Dropbox, etc."
+category = "cloud_sync_conflict"
+risk = "low"
+
+[[rule.targets]]
+platform = "windows"
+paths = ["~/OneDrive", "~/Dropbox", "~/Google Drive"]
+patterns = ["*conflicted copy*", "*conflicting copy*"]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["~/Dropbox", "~/Google Drive"]
+patterns = ["*conflicted copy*", "*conflicting copy*"]
+
+[[rule.targets]]
+platform = "macos"
+paths = ["~/Dropbox", "~/Google Drive", "~/Library/Mobile Documents"]
+patterns = ["*conflicted copy*", "*conflicting copy*"]

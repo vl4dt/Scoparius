@@ -1,0 +1,33 @@
+[rule]
+name = "browser-cache"
+description = "Browser cache directories across all major browsers"
+category = "cache"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{LOCALAPPDATA}/Google/Chrome/User Data/Default/Cache",
+    "{LOCALAPPDATA}/Google/Chrome/User Data/Default/Code Cache",
+    "{LOCALAPPDATA}/Mozilla/Firefox/Profiles/*/cache2",
+    "{LOCALAPPDATA}/Microsoft/Edge/User Data/Default/Cache",
+    "{LOCALAPPDATA}/BraveSoftware/Brave-Browser/User Data/Default/Cache",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = [
+    "~/.cache/google-chrome",
+    "~/.cache/chromium",
+    "~/.cache/mozilla/firefox",
+    "~/.cache/BraveSoftware",
+]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Caches/Google/Chrome",
+    "~/Library/Caches/Firefox",
+    "~/Library/Caches/com.microsoft.Edge",
+    "~/Library/Caches/BraveSoftware.Brave-Browser",
+]

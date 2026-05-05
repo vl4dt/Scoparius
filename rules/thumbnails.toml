@@ -1,0 +1,22 @@
+[rule]
+name = "thumbnails"
+description = "OS-generated thumbnail caches"
+category = "thumbnail"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{LOCALAPPDATA}/Microsoft/Windows/Explorer",
+]
+patterns = ["thumbcache_*.db"]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["~/.cache/thumbnails"]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Caches/com.apple.QuickLook.thumbnailcache",
+]

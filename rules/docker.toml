@@ -1,0 +1,27 @@
+[rule]
+name = "docker"
+description = "Docker build cache and dangling images data"
+category = "cache"
+risk = "medium"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{LOCALAPPDATA}/Docker/wsl/data",
+    "{USERPROFILE}/.docker",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = [
+    "/var/lib/docker/overlay2",
+    "/var/lib/docker/tmp",
+    "~/.docker",
+]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Containers/com.docker.docker/Data/vms",
+    "~/.docker",
+]

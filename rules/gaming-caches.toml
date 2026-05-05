@@ -1,0 +1,29 @@
+[rule]
+name = "gaming-caches"
+description = "Game launcher and game caches"
+category = "cache"
+risk = "low"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{LOCALAPPDATA}/Steam/htmlcache",
+    "{LOCALAPPDATA}/EpicGamesLauncher/Saved/webcache",
+    "{LOCALAPPDATA}/GOG.com/Galaxy/webcache",
+    "{APPDATA}/Unity/Asset Store-5.x",
+    "{LOCALAPPDATA}/UnrealEngine/Common/DerivedDataCache",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = [
+    "~/.steam/steam/appcache",
+    "~/.local/share/Steam/appcache",
+]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Caches/com.valvesoftware.steam",
+    "~/Library/Caches/Unity",
+]

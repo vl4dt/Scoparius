@@ -1,0 +1,22 @@
+[rule]
+name = "font-caches"
+description = "OS and application font caches"
+category = "cache"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{LOCALAPPDATA}/Microsoft/FontCache",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["~/.cache/fontconfig"]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Caches/com.apple.FontRegistry",
+    "/System/Library/Caches/com.apple.ATS",
+]

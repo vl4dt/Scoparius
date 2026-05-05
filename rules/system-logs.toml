@@ -1,0 +1,27 @@
+[rule]
+name = "system-logs"
+description = "System and application log files older than threshold"
+category = "log"
+risk = "low"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{WINDIR}/Logs",
+    "{ProgramData}/Microsoft/Windows/WER",
+    "{LOCALAPPDATA}/CrashDumps",
+]
+extensions = ["log", "etl", "dmp", "mdmp"]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["/var/log"]
+extensions = ["log", "log.1", "log.gz", "log.old"]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "/var/log",
+    "~/Library/Logs",
+]
+extensions = ["log", "crash"]

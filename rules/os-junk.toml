@@ -1,0 +1,20 @@
+[rule]
+name = "os-junk"
+description = "OS-generated junk files (Thumbs.db, .DS_Store, desktop.ini)"
+category = "os_junk"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = []
+patterns = ["Thumbs.db", "desktop.ini", "ehthumbs.db", "ehthumbs_vista.db"]
+
+[[rule.targets]]
+platform = "linux"
+paths = []
+patterns = [".directory", ".Trash-*"]
+
+[[rule.targets]]
+platform = "macos"
+paths = []
+patterns = [".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", "._*"]

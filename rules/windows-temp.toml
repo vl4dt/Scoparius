@@ -1,0 +1,16 @@
+[rule]
+name = "windows-temp"
+description = "Windows temporary and prefetch files"
+category = "temp"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{TEMP}",
+    "{TMP}",
+    "{WINDIR}/Temp",
+    "{LOCALAPPDATA}/Temp",
+    "{WINDIR}/Prefetch",
+    "{WINDIR}/SoftwareDistribution/Download",
+]

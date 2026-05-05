@@ -1,0 +1,12 @@
+[rule]
+name = "windows-update"
+description = "Windows Update download cache and old installers"
+category = "cache"
+risk = "low"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{WINDIR}/SoftwareDistribution/Download",
+    "{WINDIR}/Installer/$PatchCache$",
+]

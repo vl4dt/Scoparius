@@ -1,0 +1,36 @@
+[rule]
+name = "ide-caches"
+description = "IDE and code editor caches and temporary data"
+category = "cache"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{APPDATA}/Code/Cache",
+    "{APPDATA}/Code/CachedData",
+    "{APPDATA}/Code/CachedExtensions",
+    "{APPDATA}/Code/CachedExtensionVSIXs",
+    "{APPDATA}/Code/Code Cache",
+    "{APPDATA}/JetBrains/*/caches",
+    "{LOCALAPPDATA}/JetBrains/*/caches",
+    "{APPDATA}/Sublime Text/Cache",
+]
+
+[[rule.targets]]
+platform = "linux"
+paths = [
+    "~/.config/Code/Cache",
+    "~/.config/Code/CachedData",
+    "~/.config/Code/CachedExtensions",
+    "~/.cache/JetBrains",
+    "~/.config/sublime-text/Cache",
+]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Caches/com.microsoft.VSCode",
+    "~/Library/Caches/JetBrains",
+    "~/Library/Caches/com.sublimetext.4",
+]

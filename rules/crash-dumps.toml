@@ -1,0 +1,28 @@
+[rule]
+name = "crash-dumps"
+description = "Application crash dumps and error reports"
+category = "crash_dump"
+risk = "safe"
+
+[[rule.targets]]
+platform = "windows"
+paths = [
+    "{LOCALAPPDATA}/CrashDumps",
+    "{ProgramData}/Microsoft/Windows/WER/ReportQueue",
+    "{ProgramData}/Microsoft/Windows/WER/ReportArchive",
+    "{LOCALAPPDATA}/Microsoft/Windows/WER",
+]
+extensions = ["dmp", "mdmp", "hdmp"]
+
+[[rule.targets]]
+platform = "linux"
+paths = ["/var/crash", "/var/lib/systemd/coredump"]
+extensions = ["crash", "core"]
+
+[[rule.targets]]
+platform = "macos"
+paths = [
+    "~/Library/Logs/DiagnosticReports",
+    "/Library/Logs/DiagnosticReports",
+]
+extensions = ["crash", "ips", "spin", "diag"]
