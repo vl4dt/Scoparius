@@ -23,7 +23,6 @@ pub struct FileEntry {
     /// Creation time (platform-dependent).
     pub created: Option<DateTime<Utc>>,
     /// Content hash (computed on-demand for duplicate detection).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     /// Categorization assigned by the analyzer.
     pub category: Option<FileCategory>,
@@ -245,6 +244,21 @@ pub struct CleanAction {
     pub reason: String,
     /// Current status.
     pub status: ActionStatus,
+}
+
+impl CleanAction {
+    pub fn new_delete(path: PathBuf, size: u64, category: FileCategory, reason: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            path,
+            operation: CleanOperation::Delete,
+            category,
+            risk: RiskLevel::Safe,
+            size,
+            reason,
+            status: ActionStatus::Pending,
+        }
+    }
 }
 
 /// Type of cleanup operation.

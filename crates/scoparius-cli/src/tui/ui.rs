@@ -116,6 +116,12 @@ fn render_status_panel(app: &App, frame: &mut Frame, area: Rect) {
             Line::from(format!("TOTAL SIZE:  {}", ByteSize(*total_size))),
             Line::from(format!("DURATION:    {:.1}s", duration.as_secs_f32())),
         ],
+        ScanStatus::Cleaning { action_index, total_actions, current_path, bytes_freed } => vec![
+            Line::from(vec![Span::styled("CLEANING:  ", Style::default().fg(Color::Red).bold()), Span::raw("ACTIVE")]),
+            Line::from(format!("PROGRESS: {} / {}", action_index, total_actions)),
+            Line::from(format!("FREED:    {}", ByteSize(*bytes_freed))),
+            Line::from(format!("PATH:     {}", current_path)).dim(),
+        ],
         ScanStatus::Error(e) => vec![
             Line::from(vec![Span::styled("ERROR: ", Style::default().fg(Color::Red).bold()), Span::raw(e)]),
         ],
@@ -242,9 +248,24 @@ fn render_scan_progress(app: &App, frame: &mut Frame, area: Rect) {
             let chunks = Layout::default()
                 .constraints([Constraint::Length(3), Constraint::Min(0)])
                 .split(inner);
-            
+
             frame.render_widget(gauge, chunks[0]);
             frame.render_widget(Paragraph::new(format!("HASHING: {}", current_path)).dim(), chunks[1]);
+        }
+        ScanStatus::Cleaning { action_index, total_actions, current_path, bytes_freed } => {
+            let pct = if *total_actions > 0 { (*action_index as f64 / *total_actions as f64 * 100.0) as u16 } else { 100 };
+            let gauge = Gauge::default()
+                .block(Block::default().title(" EXECUTING_CLEANUP_PLAN "))
+                .gauge_style(Style::default().fg(Color::Red).bg(Color::Black))
+                .percent(pct)
+                .label(format!("ACTION {} / {} | FREED: {}", action_index, total_actions, ByteSize(*bytes_freed)));
+            
+            let chunks = Layout::default()
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .split(inner);
+            
+            frame.render_widget(gauge, chunks[0]);
+            frame.render_widget(Paragraph::new(format!("DELETING: {}", current_path)).red().dim(), chunks[1]);
         }
         ScanStatus::Idle => {
             frame.render_widget(Paragraph::new("READY TO SCAN\nPress [S] to start analysis of all disks.").alignment(ratatui::layout::Alignment::Center), inner);
@@ -303,9 +324,11 @@ fn render_apps(app: &App, frame: &mut Frame, area: Rect) {
         Constraint::Percentage(20),
     ])
     .header(header)
+    .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .highlight_symbol(">> ")
     .block(Block::default().padding(Padding::uniform(1)));
 
-    frame.render_widget(table, inner);
+    frame.render_stateful_widget(table, inner, &mut app.apps_table_state.clone());
 }
 
 fn render_duplicates(app: &App, frame: &mut Frame, area: Rect) {
@@ -352,6 +375,14 @@ fn render_duplicates(app: &App, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .bottom_margin(1);
 
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(10), // Detail panel
+        ])
+        .split(inner);
+
     let table = Table::new(rows, [
         Constraint::Length(10),
         Constraint::Min(40),
@@ -360,9 +391,34 @@ fn render_duplicates(app: &App, frame: &mut Frame, area: Rect) {
         Constraint::Length(15),
     ])
     .header(header)
+    .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .highlight_symbol(">> ")
     .block(Block::default().padding(Padding::uniform(1)));
 
-    frame.render_widget(table, inner);
+    frame.render_stateful_widget(table, chunks[0], &mut app.dups_table_state.clone());
+
+    // Render detail panel for selected cluster
+    if let Some(selected) = app.dups_table_state.selected() {
+        if let Some(group) = app.duplicates.get(selected) {
+            let detail_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(format!(" CLUSTER_DETAILS [HASH: {}] ", &group.hash[..8]));
+            
+            let mut details = vec![
+                Line::from(vec![Span::raw("FILES IN CLUSTER: "), Span::styled(group.paths.len().to_string(), Style::default().fg(Color::Cyan))]),
+                Line::from(vec![Span::raw("WASTED CAPACITY:  "), Span::styled(ByteSize(group.wasted_bytes).to_string(), Style::default().fg(Color::Yellow))]),
+                Line::from(""),
+                Line::from(Span::styled("ALL PATHS:", Style::default().add_modifier(Modifier::UNDERLINED))),
+            ];
+
+            for path in &group.paths {
+                details.push(Line::from(format!(" - {}", path.display())).dim());
+            }
+
+            frame.render_widget(Paragraph::new(details).block(detail_block.padding(Padding::uniform(1))), chunks[1]);
+        }
+    }
 }
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
@@ -372,10 +428,13 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Span::raw(" [R]efresh "),
     ];
 
-    if matches!(app.scan_status, ScanStatus::Scanning { .. }) {
+    if matches!(app.scan_status, ScanStatus::Scanning { .. }) || matches!(app.scan_status, ScanStatus::Hashing { .. }) {
         keys.push(Span::styled(" [C]ancel ", Style::default().fg(Color::Red)));
     } else {
         keys.push(Span::styled(" [S]tart Scan ", Style::default().fg(Color::Green)));
+        if !app.duplicates.is_empty() {
+            keys.push(Span::styled(" [X] Clean Selected ", Style::default().fg(Color::Red).bold()));
+        }
     }
 
     let footer = Paragraph::new(Line::from(keys));

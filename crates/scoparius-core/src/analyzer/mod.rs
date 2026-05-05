@@ -9,19 +9,33 @@ pub mod registry;
 
 use crate::config::ThresholdConfig;
 use crate::models::{FileCategory, FileEntry, RiskLevel, ScanResult};
+use crate::rules::{self, CleanupRule};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Analyzer that categorizes file entries from scan results.
 pub struct Analyzer {
     thresholds: ThresholdConfig,
+    rules: Vec<CleanupRule>,
 }
 
 impl Analyzer {
     /// Create a new analyzer with the given thresholds.
     pub fn new(thresholds: ThresholdConfig) -> Self {
-        Self { thresholds }
+        Self {
+            thresholds,
+            rules: Vec::new(),
+        }
+    }
+
+    /// Create a new analyzer with thresholds and rules loaded from a directory.
+    pub fn with_rules(thresholds: ThresholdConfig, rules_dir: Option<PathBuf>) -> Self {
+        let mut rules = Vec::new();
+        if let Some(dir) = rules_dir {
+            rules = rules::load_rules(&dir);
+        }
+        Self { thresholds, rules }
     }
 
     /// Analyze a scan result, categorizing all entries in-place.
@@ -40,6 +54,11 @@ impl Analyzer {
     /// Classify a single file entry.
     fn classify(&self, entry: &FileEntry) -> Option<(FileCategory, RiskLevel)> {
         let path = &entry.path;
+
+        // 0. Match against TOML rules first (highest priority)
+        if let Some((category, risk)) = self.match_rules(entry) {
+            return Some((category, risk));
+        }
 
         // Check each category in priority order
 
@@ -177,6 +196,71 @@ impl Analyzer {
     fn is_large_and_stale(&self, entry: &FileEntry) -> bool {
         entry.size >= self.thresholds.large_file_bytes
             && is_older_than_days(entry, self.thresholds.stale_days)
+    }
+
+    fn match_rules(&self, entry: &FileEntry) -> Option<(FileCategory, RiskLevel)> {
+        let path_str = entry.path.to_string_lossy();
+        let ext = extension_lower(&entry.path);
+
+        for rule in &self.rules {
+            for target in &rule.rule.targets {
+                // Check platform
+                #[cfg(windows)]
+                if target.platform != "windows" && target.platform != "all" { continue; }
+                #[cfg(target_os = "linux")]
+                if target.platform != "linux" && target.platform != "all" { continue; }
+                #[cfg(target_os = "macos")]
+                if target.platform != "macos" && target.platform != "all" { continue; }
+
+                let mut matched = false;
+
+                // 1. Path match
+                for p in &target.paths {
+                    let expanded = rules::expand_path(p);
+                    if entry.path.starts_with(&expanded) {
+                        matched = true;
+                        break;
+                    }
+                }
+
+                // 2. Extension match
+                if !matched && !target.extensions.is_empty() {
+                    if let Some(ref e) = ext {
+                        if target.extensions.iter().any(|ext| ext.to_lowercase() == *e) {
+                            matched = true;
+                        }
+                    }
+                }
+
+                // 3. Pattern match
+                if !matched && !target.patterns.is_empty() {
+                    if target.patterns.iter().any(|pat| path_str.contains(pat)) {
+                        matched = true;
+                    }
+                }
+
+                if matched {
+                    let category = match rule.rule.category.as_str() {
+                        "temp" => FileCategory::TempFile,
+                        "cache" => FileCategory::Cache,
+                        "log" => FileCategory::Log,
+                        "browser" => FileCategory::BrowserData,
+                        "build" => FileCategory::BuildArtifact,
+                        "junk" => FileCategory::OsJunk,
+                        _ => FileCategory::Custom(0),
+                    };
+                    let risk = match rule.rule.risk.as_str() {
+                        "safe" => RiskLevel::Safe,
+                        "low" => RiskLevel::Low,
+                        "medium" => RiskLevel::Medium,
+                        "high" => RiskLevel::High,
+                        _ => RiskLevel::Low,
+                    };
+                    return Some((category, risk));
+                }
+            }
+        }
+        None
     }
 
     /// Get a summary of categorized entries.

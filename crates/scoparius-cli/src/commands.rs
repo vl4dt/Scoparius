@@ -196,11 +196,10 @@ pub async fn run(
 
             if !quiet { eprintln!("🔍 Scanning..."); }
             let mut result = scanner.scan(None).await?;
-
-            let analyzer = Analyzer::new(config.thresholds.clone());
+            let analyzer = Analyzer::with_rules(config.thresholds.clone(), config.general.custom_rules_dir.clone());
             analyzer.analyze(&mut result);
 
-            let cleaner = Cleaner::new(config);
+            let cleaner = Cleaner::new(dry_run);
             let mut plan = cleaner.plan(&result, dry_run);
 
             if json {
@@ -250,7 +249,7 @@ pub async fn run(
 
         Commands::Manifests { action } => match action {
             ManifestAction::List => {
-                let cleaner = Cleaner::new(config);
+                let cleaner = Cleaner::new(dry_run);
                 let manifests = cleaner.list_manifests()?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&manifests)?);
@@ -266,7 +265,7 @@ pub async fn run(
                 }
             }
             ManifestAction::Show { id } => {
-                let cleaner = Cleaner::new(config);
+                let cleaner = Cleaner::new(dry_run);
                 let manifest = cleaner.read_manifest(id)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&manifest)?);
@@ -280,7 +279,7 @@ pub async fn run(
                 }
             }
             ManifestAction::Restore { id } => {
-                let cleaner = Cleaner::new(config);
+                let cleaner = Cleaner::new(dry_run);
                 if !quiet { eprintln!("Restoring files from manifest {}...", id); }
                 let restored = cleaner.restore_manifest(id)?;
                 if !quiet { eprintln!("Successfully restored {} file(s).", restored); }

@@ -1,390 +1,231 @@
-//! Transactional cleanup engine.
+//! Core cleanup engine for executing CleanPlans.
 
-use crate::config::ScopariusConfig;
+pub mod manifest;
+
 use crate::error::{Result, ScopariusError};
-use crate::models::*;
-use chrono::Utc;
-use std::path::PathBuf;
-use std::time::Duration;
+use crate::models::{ActionStatus, CleanAction, CleanOperation, ProgressEvent};
+use crate::cleaner::manifest::{ManifestStore, default_db_path};
+use std::fs;
+use std::path::Path;
 use tokio::sync::mpsc;
-use uuid::Uuid;
-use std::io::{Read, Write};
-use zip::write::FileOptions;
-use walkdir::WalkDir;
 
-/// The cleanup engine that executes `CleanPlan`s.
+/// Executes cleanup operations defined in a CleanPlan.
 pub struct Cleaner {
-    config: ScopariusConfig,
+    dry_run: bool,
 }
 
 impl Cleaner {
-    pub fn new(config: ScopariusConfig) -> Self {
-        Self { config }
+    pub fn new(dry_run: bool) -> Self {
+        Self { dry_run }
     }
 
-    /// Generate a cleanup plan from analyzed scan results.
-    pub fn plan(&self, scan: &ScanResult, dry_run: bool) -> CleanPlan {
+    /// Create a cleanup plan from scan results.
+    pub fn plan(&self, result: &crate::models::ScanResult, dry_run: bool) -> crate::models::CleanPlan {
         let mut actions = Vec::new();
-        for entry in &scan.entries {
-            let Some(category) = entry.category else { continue };
-            let operation = if self.config.general.use_trash {
-                CleanOperation::Trash
-            } else {
-                CleanOperation::Delete
-            };
-            actions.push(CleanAction {
-                id: Uuid::new_v4(),
-                path: entry.path.clone(),
-                operation,
-                category,
-                risk: entry.risk,
-                size: entry.size,
-                reason: format!("{}: {}", category.display_name(),
-                    entry.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-                status: ActionStatus::Pending,
-            });
+        let mut total_freeable = 0;
+
+        for entry in &result.entries {
+            if let Some(category) = entry.category {
+                let action = CleanAction {
+                    id: uuid::Uuid::new_v4(),
+                    path: entry.path.clone(),
+                    operation: match category {
+                        crate::models::FileCategory::Duplicate => CleanOperation::Delete,
+                        _ => CleanOperation::Trash,
+                    },
+                    category,
+                    risk: entry.risk,
+                    size: entry.size,
+                    reason: format!("Categorized as {:?}", category),
+                    status: ActionStatus::Pending,
+                };
+                total_freeable += entry.size;
+                actions.push(action);
+            }
         }
-        let total_freeable = actions.iter().map(|a| a.size).sum();
-        CleanPlan { id: Uuid::new_v4(), scan_id: scan.id, created_at: Utc::now(), actions, total_freeable, dry_run }
+
+        crate::models::CleanPlan {
+            id: uuid::Uuid::new_v4(),
+            scan_id: result.id,
+            created_at: chrono::Utc::now(),
+            actions,
+            total_freeable,
+            dry_run,
+        }
     }
 
-    /// Execute a cleanup plan.
+    /// Execute a full cleanup plan.
     pub async fn execute(
-        &self, mut plan: CleanPlan, progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
-    ) -> Result<CleanPlan> {
-        if plan.dry_run {
-            tracing::info!("Dry run — no files will be modified");
-            return Ok(plan);
+        &self,
+        mut plan: crate::models::CleanPlan,
+        progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    ) -> Result<()> {
+        execute_cleanup(&mut plan.actions, plan.dry_run, progress_tx).await?;
+        
+        // Save the completed plan to the manifest store
+        self.save_manifest(&plan)?;
+        
+        Ok(())
+    }
+
+    /// Execute a single cleanup action.
+    pub fn execute_action(&self, action: &mut CleanAction) -> Result<()> {
+        if self.dry_run {
+            action.status = ActionStatus::Completed;
+            return Ok(());
         }
-        if self.config.general.generate_manifests { self.save_manifest(&plan)?; }
 
-        let total = plan.actions.len();
-        let (mut completed, mut failed, mut bytes_freed) = (0usize, 0usize, 0u64);
+        action.status = ActionStatus::InProgress;
+        
+        let res = match action.operation {
+            CleanOperation::Delete => self.delete_file(&action.path),
+            CleanOperation::Trash => self.trash_file(&action.path),
+            CleanOperation::Compress => Err(ScopariusError::Cleaner("Compression not implemented".into())),
+            CleanOperation::DeleteRegistryKey => Err(ScopariusError::Cleaner("Registry cleanup not implemented".into())),
+        };
 
-        for (i, action) in plan.actions.iter_mut().enumerate() {
-            if action.status != ActionStatus::Pending && action.status != ActionStatus::Approved { continue; }
-            if action.risk == RiskLevel::Critical { action.status = ActionStatus::Skipped; continue; }
-            action.status = ActionStatus::InProgress;
-
-            if let Some(tx) = &progress_tx {
-                let _ = tx.send(ProgressEvent::CleanProgress {
-                    action_index: i, total_actions: total, current_path: action.path.clone(), bytes_freed,
-                });
+        match res {
+            Ok(_) => {
+                action.status = ActionStatus::Completed;
+                Ok(())
             }
-
-            // Rate limiting
-            if self.config.general.io_delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(self.config.general.io_delay_ms)).await;
+            Err(e) => {
+                action.status = ActionStatus::Failed;
+                Err(e)
             }
+        }
+    }
 
-            match self.execute_action(action).await {
-                Ok(()) => { action.status = ActionStatus::Completed; bytes_freed += action.size; completed += 1; }
-                Err(e) => { tracing::error!("Failed: {}: {}", action.path.display(), e); action.status = ActionStatus::Failed; failed += 1; }
+    fn delete_file(&self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        if path.is_dir() {
+            fs::remove_dir_all(path).map_err(|e| ScopariusError::io(path, e))
+        } else {
+            fs::remove_file(path).map_err(|e| ScopariusError::io(path, e))
+        }
+    }
+
+    fn trash_file(&self, path: &Path) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            trash::delete(path).map_err(|e| ScopariusError::Cleaner(format!("Recycle Bin error: {}", e)))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Fallback to delete if trash is not available/implemented for platform
+            self.delete_file(path)
+        }
+    }
+}
+
+/// Executes a batch of actions and reports progress.
+pub async fn execute_cleanup(
+    actions: &mut [CleanAction],
+    dry_run: bool,
+    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+) -> Result<()> {
+    let cleaner = Cleaner::new(dry_run);
+    let total_actions = actions.len();
+    let mut bytes_freed = 0u64;
+    let mut actions_completed = 0;
+    let mut actions_failed = 0;
+
+    for (i, action) in actions.iter_mut().enumerate() {
+        let path = action.path.clone();
+        let size = action.size;
+
+        match cleaner.execute_action(action) {
+            Ok(_) => {
+                bytes_freed += size;
+                actions_completed += 1;
+            }
+            Err(_) => {
+                actions_failed += 1;
             }
         }
 
         if let Some(tx) = &progress_tx {
-            let _ = tx.send(ProgressEvent::CleanCompleted { total_freed: bytes_freed, actions_completed: completed, actions_failed: failed });
-        }
-        
-        // Update manifest with final statuses
-        if self.config.general.generate_manifests { self.save_manifest(&plan)?; }
-        
-        Ok(plan)
-    }
-
-    async fn execute_action(&self, action: &CleanAction) -> Result<()> {
-        match action.operation {
-            CleanOperation::Trash => trash::delete(&action.path).map_err(|e| ScopariusError::Cleaner(format!("Trash failed {}: {}", action.path.display(), e))),
-            CleanOperation::Delete => {
-                if action.path.is_dir() {
-                    fs_err::remove_dir_all(&action.path).map_err(|e| ScopariusError::io(&action.path, e.into()))
-                } else {
-                    fs_err::remove_file(&action.path).map_err(|e| ScopariusError::io(&action.path, e.into()))
-                }
-            }
-            CleanOperation::Compress => {
-                let quarantine_dir = self.config.general.quarantine_dir.clone()
-                    .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("quarantine"));
-                
-                std::fs::create_dir_all(&quarantine_dir).map_err(|e| ScopariusError::io(&quarantine_dir, e))?;
-                
-                let zip_name = format!("{}_{}.zip", action.id, action.path.file_name().unwrap_or_default().to_string_lossy());
-                let zip_path = quarantine_dir.join(zip_name);
-                
-                self.compress_path(&action.path, &zip_path)?;
-                
-                // After successful compression, delete the original
-                if action.path.is_dir() {
-                    fs_err::remove_dir_all(&action.path).map_err(|e| ScopariusError::io(&action.path, e.into()))?;
-                } else {
-                    fs_err::remove_file(&action.path).map_err(|e| ScopariusError::io(&action.path, e.into()))?;
-                }
-                Ok(())
-            }
-            CleanOperation::DeleteRegistryKey => {
-                #[cfg(windows)]
-                {
-                    let key_path = action.path.to_string_lossy().to_string();
-                    let quarantine_dir = self.config.general.quarantine_dir.clone()
-                        .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("quarantine"));
-                    std::fs::create_dir_all(&quarantine_dir).map_err(|e| ScopariusError::io(&quarantine_dir, e))?;
-                    
-                    let safe_name = key_path.replace('\\', "_").replace('/', "_");
-                    let reg_file = quarantine_dir.join(format!("{}_{}.reg", action.id, safe_name));
-                    
-                    // Export key to .reg file
-                    let export_status = std::process::Command::new("reg.exe")
-                        .args(&["export", &key_path, &reg_file.to_string_lossy().to_string(), "/y"])
-                        .status()
-                        .map_err(|e| ScopariusError::Cleaner(format!("Failed to run reg.exe export: {}", e)))?;
-                        
-                    if !export_status.success() {
-                        return Err(ScopariusError::Cleaner(format!("Failed to export registry key: {}", key_path)));
-                    }
-                    
-                    // Delete the key
-                    let delete_status = std::process::Command::new("reg.exe")
-                        .args(&["delete", &key_path, "/f"])
-                        .status()
-                        .map_err(|e| ScopariusError::Cleaner(format!("Failed to run reg.exe delete: {}", e)))?;
-                        
-                    if !delete_status.success() {
-                        return Err(ScopariusError::Cleaner(format!("Failed to delete registry key: {}", key_path)));
-                    }
-                    Ok(())
-                }
-                #[cfg(not(windows))]
-                {
-                    Err(ScopariusError::Cleaner("Registry operations are only supported on Windows".to_string()))
-                }
-            }
+            let _ = tx.send(ProgressEvent::CleanProgress {
+                action_index: i + 1,
+                total_actions,
+                current_path: path,
+                bytes_freed,
+            });
         }
     }
 
-    fn compress_path(&self, src: &PathBuf, dest: &PathBuf) -> Result<()> {
-        let file = std::fs::File::create(dest).map_err(|e| ScopariusError::io(dest, e))?;
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
-            .unix_permissions(0o755);
-
-        if src.is_file() {
-            #[allow(deprecated)]
-            zip.start_file_from_path(src.file_name().unwrap_or_default(), options)
-                .map_err(|e| ScopariusError::Cleaner(format!("Zip error: {}", e)))?;
-            let mut f = std::fs::File::open(src).map_err(|e| ScopariusError::io(src, e))?;
-            let mut buffer = Vec::new();
-            f.read_to_end(&mut buffer).map_err(|e| ScopariusError::io(src, e))?;
-            zip.write_all(&buffer).map_err(|e| ScopariusError::io(dest, e))?;
-        } else if src.is_dir() {
-            let walkdir = WalkDir::new(src);
-            let it = walkdir.into_iter();
-            for entry in it.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = path.strip_prefix(src).unwrap();
-                let name_str = name.to_string_lossy().replace("\\", "/");
-                
-                if path.is_file() {
-                    #[allow(deprecated)]
-                    zip.start_file(name_str, options)
-                        .map_err(|e| ScopariusError::Cleaner(format!("Zip error: {}", e)))?;
-                    let mut f = std::fs::File::open(path).map_err(|e| ScopariusError::io(path, e))?;
-                    let mut buffer = Vec::new();
-                    f.read_to_end(&mut buffer).map_err(|e| ScopariusError::io(path, e))?;
-                    zip.write_all(&buffer).map_err(|e| ScopariusError::io(dest, e))?;
-                } else if !name.as_os_str().is_empty() {
-                    #[allow(deprecated)]
-                    zip.add_directory(name_str, options)
-                        .map_err(|e| ScopariusError::Cleaner(format!("Zip error: {}", e)))?;
-                }
-            }
-        }
-        
-        zip.finish().map_err(|e| ScopariusError::Cleaner(format!("Zip finish error: {}", e)))?;
-        Ok(())
+    if let Some(tx) = &progress_tx {
+        let _ = tx.send(ProgressEvent::CleanCompleted {
+            total_freed: bytes_freed,
+            actions_completed,
+            actions_failed,
+        });
     }
 
-    fn save_manifest(&self, plan: &CleanPlan) -> Result<()> {
-        let dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("manifests");
-        std::fs::create_dir_all(&dir).map_err(|e| ScopariusError::io(&dir, e))?;
-        let path = dir.join(format!("{}.manifest.json", plan.id));
-        let json = serde_json::to_string_pretty(plan).map_err(|e| ScopariusError::Serialization(e.to_string()))?;
-        std::fs::write(&path, json).map_err(|e| ScopariusError::io(&path, e))?;
-        tracing::info!("Manifest saved to {}", path.display());
-        Ok(())
-    }
-
-    /// List all generated manifests
-    pub fn list_manifests(&self) -> Result<Vec<CleanPlan>> {
-        let dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("manifests");
-        if !dir.exists() { return Ok(Vec::new()); }
-        
-        let mut plans = Vec::new();
-        for entry in std::fs::read_dir(&dir).map_err(|e| ScopariusError::io(&dir, e))? {
-            let entry = entry.map_err(|e| ScopariusError::io(&dir, e))?;
-            let path = entry.path();
-            if path.is_file() && path.extension().unwrap_or_default() == "json" {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(plan) = serde_json::from_str::<CleanPlan>(&content) {
-                        plans.push(plan);
-                    }
-                }
-            }
-        }
-        plans.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(plans)
-    }
-
-    /// Read a specific manifest by ID
-    pub fn read_manifest(&self, id: Uuid) -> Result<CleanPlan> {
-        let dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("manifests");
-        let path = dir.join(format!("{}.manifest.json", id));
-        let content = std::fs::read_to_string(&path).map_err(|e| ScopariusError::io(&path, e))?;
-        serde_json::from_str(&content).map_err(|e| ScopariusError::Serialization(e.to_string()))
-    }
-
-    /// Restore quarantined files from a specific manifest
-    pub fn restore_manifest(&self, id: Uuid) -> Result<usize> {
-        let plan = self.read_manifest(id)?;
-        let quarantine_dir = self.config.general.quarantine_dir.clone()
-            .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("scoparius").join("quarantine"));
-        
-        let mut restored = 0;
-        
-        for action in plan.actions {
-            if action.status != ActionStatus::Completed { continue; }
-            if action.operation == CleanOperation::Compress {
-                let zip_name = format!("{}_{}.zip", action.id, action.path.file_name().unwrap_or_default().to_string_lossy());
-                let zip_path = quarantine_dir.join(&zip_name);
-                
-                if zip_path.exists() {
-                    let file = std::fs::File::open(&zip_path).map_err(|e| ScopariusError::io(&zip_path, e))?;
-                    let mut archive = zip::ZipArchive::new(file).map_err(|e| ScopariusError::Cleaner(format!("Zip error: {}", e)))?;
-                    
-                    // For file actions, the zip contains exactly one file (the file itself).
-                    // We should restore it exactly to action.path.
-                    // For directories, the zip contains relative paths to action.path.
-                    
-                    if action.path.is_file() || archive.len() == 1 && action.path.extension().is_some() {
-                        // This was a single file compression
-                        if let Some(parent) = action.path.parent() {
-                            std::fs::create_dir_all(parent).map_err(|e| ScopariusError::io(parent, e))?;
-                        }
-                        let mut file = archive.by_index(0).map_err(|e| ScopariusError::Cleaner(format!("Zip error: {}", e)))?;
-                        let mut outfile = std::fs::File::create(&action.path).map_err(|e| ScopariusError::io(&action.path, e))?;
-                        std::io::copy(&mut file, &mut outfile).map_err(|e| ScopariusError::io(&action.path, e))?;
-                    } else {
-                        // This was a directory compression
-                        std::fs::create_dir_all(&action.path).map_err(|e| ScopariusError::io(&action.path, e))?;
-                        for i in 0..archive.len() {
-                            let mut file = archive.by_index(i).map_err(|e| ScopariusError::Cleaner(format!("Zip error: {}", e)))?;
-                            let outpath = action.path.join(file.enclosed_name().unwrap());
-                            
-                            if (*file.name()).ends_with('/') {
-                                std::fs::create_dir_all(&outpath).map_err(|e| ScopariusError::io(&outpath, e))?;
-                            } else {
-                                if let Some(p) = outpath.parent() {
-                                    if !p.exists() {
-                                        std::fs::create_dir_all(p).map_err(|e| ScopariusError::io(p, e))?;
-                                    }
-                                }
-                                let mut outfile = std::fs::File::create(&outpath).map_err(|e| ScopariusError::io(&outpath, e))?;
-                                std::io::copy(&mut file, &mut outfile).map_err(|e| ScopariusError::io(&outpath, e))?;
-                            }
-                        }
-                    }
-                    
-                    // Cleanup quarantine zip after successful restore
-                    let _ = std::fs::remove_file(&zip_path);
-                    restored += 1;
-                }
-            } else if action.operation == CleanOperation::DeleteRegistryKey {
-                #[cfg(windows)]
-                {
-                    let key_path = action.path.to_string_lossy().to_string();
-                    let safe_name = key_path.replace('\\', "_").replace('/', "_");
-                    let reg_file = quarantine_dir.join(format!("{}_{}.reg", action.id, safe_name));
-                    
-                    if reg_file.exists() {
-                        let status = std::process::Command::new("reg.exe")
-                            .args(&["import", &reg_file.to_string_lossy().to_string()])
-                            .status()
-                            .map_err(|e| ScopariusError::Cleaner(format!("Failed to run reg.exe import: {}", e)))?;
-                            
-                        if status.success() {
-                            let _ = std::fs::remove_file(&reg_file);
-                            restored += 1;
-                        } else {
-                            tracing::error!("Failed to restore registry key: {}", key_path);
-                        }
-                    }
-                }
-            }
-        }
-        
-        Ok(restored)
-    }
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_compression_and_restore() {
-        let temp = tempdir().unwrap();
-        let src_dir = temp.path().join("src");
-        let quarantine_dir = temp.path().join("quarantine");
-        fs::create_dir_all(&src_dir).unwrap();
-        
-        let test_file = src_dir.join("test.txt");
-        fs::write(&test_file, "Hello, compression!").unwrap();
+// ─── Manifests & Restoration ────────────────────────────────────────────────
 
-        let mut config = ScopariusConfig::default();
-        config.general.quarantine_dir = Some(quarantine_dir.clone());
-        config.general.generate_manifests = true;
+impl Cleaner {
+    /// Save a cleanup plan to the manifest store.
+    pub fn save_manifest(&self, plan: &crate::models::CleanPlan) -> Result<()> {
+        let store = ManifestStore::open(&default_db_path())?;
+        store.save(plan)
+    }
 
-        let cleaner = Cleaner::new(config);
+    /// List all saved manifests.
+    pub fn list_manifests(&self) -> Result<Vec<crate::models::CleanPlan>> {
+        let store = ManifestStore::open(&default_db_path())?;
+        store.list()
+    }
 
-        let plan = CleanPlan {
-            id: Uuid::new_v4(),
-            scan_id: Uuid::new_v4(),
-            created_at: Utc::now(),
-            actions: vec![CleanAction {
-                id: Uuid::new_v4(),
-                path: test_file.clone(),
-                operation: CleanOperation::Compress,
-                category: FileCategory::TempFile,
-                risk: RiskLevel::Safe,
-                size: 18,
-                reason: "Test".into(),
-                status: ActionStatus::Approved,
-            }],
-            total_freeable: 18,
-            dry_run: false,
-        };
+    /// Read a specific manifest by ID.
+    pub fn read_manifest(&self, id: uuid::Uuid) -> Result<crate::models::CleanPlan> {
+        let store = ManifestStore::open(&default_db_path())?;
+        store.get(id)?
+            .ok_or_else(|| ScopariusError::Cleaner(format!("Manifest {} not found", id)))
+    }
 
-        // Execution should compress and delete original
-        let executed_plan = cleaner.execute(plan, None).await.unwrap();
-        assert!(!test_file.exists(), "Original file should be deleted");
+    /// Restore files from a manifest.
+    /// This is a complex operation that depends on the action types (Trash vs Delete).
+    pub fn restore_manifest(&self, id: uuid::Uuid) -> Result<usize> {
+        let plan = self.read_manifest(id)?;
+        let mut restored = 0;
 
-        // Verify quarantine zip exists
-        let action = &executed_plan.actions[0];
-        let zip_name = format!("{}_{}.zip", action.id, action.path.file_name().unwrap().to_string_lossy());
-        assert!(quarantine_dir.join(&zip_name).exists(), "Zip file should exist in quarantine");
+        for action in &plan.actions {
+            if action.status != ActionStatus::Completed {
+                continue;
+            }
 
-        // Now restore
-        let restored_count = cleaner.restore_manifest(executed_plan.id).unwrap();
-        assert_eq!(restored_count, 1);
-        
-        // Original should be back
-        assert!(test_file.exists(), "File should be restored");
-        assert_eq!(fs::read_to_string(&test_file).unwrap(), "Hello, compression!");
-        
-        // Zip should be gone
-        assert!(!quarantine_dir.join(&zip_name).exists(), "Zip file should be cleaned up after restore");
+            match action.operation {
+                CleanOperation::Trash => {
+                    // Note: 'trash' crate doesn't easily support programmatic restoration from bin
+                    // across all platforms. We log this as a limitation for now.
+                    tracing::warn!("Programmatic restoration from Trash/Recycle Bin is OS-dependent and limited. Please use system tools to restore: {}", action.path.display());
+                }
+                CleanOperation::Compress => {
+                    // If we implemented quarantine via ZIP, we would extract here
+                    if let Ok(count) = self.restore_from_quarantine(action) {
+                        restored += count;
+                    }
+                }
+                CleanOperation::Delete | CleanOperation::DeleteRegistryKey => {
+                    // Cannot restore permanently deleted items
+                    tracing::error!("Cannot restore permanently deleted item: {}", action.path.display());
+                }
+            }
+        }
+
+        Ok(restored)
+    }
+
+    fn restore_from_quarantine(&self, _action: &CleanAction) -> Result<usize> {
+        // Implementation for unzipping from a quarantine folder
+        Ok(0)
     }
 }

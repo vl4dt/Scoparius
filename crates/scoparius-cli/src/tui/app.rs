@@ -3,10 +3,13 @@
 use crate::tui::terminal::Tui;
 use crate::tui::ui;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::widgets::TableState;
 use scoparius_core::config::ScopariusConfig;
-use scoparius_core::models::{DiskInfo, ProgressEvent, ScanResult, AppInfo};
+use scoparius_core::models::{DiskInfo, ProgressEvent, ScanResult, AppInfo, CleanAction, FileCategory};
 use scoparius_core::platform;
 use scoparius_core::scanner::{ScanConfig, Scanner};
+use scoparius_core::cleaner;
+use scoparius_core::analyzer::Analyzer;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use std::sync::Arc;
@@ -41,6 +44,12 @@ pub enum ScanStatus {
         duration: Duration,
     },
     Error(String),
+    Cleaning {
+        action_index: usize,
+        total_actions: usize,
+        current_path: String,
+        bytes_freed: u64,
+    },
 }
 
 pub struct App {
@@ -57,6 +66,10 @@ pub struct App {
     pub duplicates: Vec<scoparius_core::analyzer::duplicates::DuplicateGroup>,
     pub scan_rx: Option<mpsc::UnboundedReceiver<ProgressEvent>>,
     pub cancel_handle: Option<Arc<AtomicBool>>,
+
+    // Navigation State
+    pub apps_table_state: TableState,
+    pub dups_table_state: TableState,
 }
 
 impl App {
@@ -77,6 +90,8 @@ impl App {
             duplicates: Vec::new(),
             scan_rx: None,
             cancel_handle: None,
+            apps_table_state: TableState::default(),
+            dups_table_state: TableState::default(),
         }
     }
 
@@ -113,8 +128,79 @@ impl App {
             KeyCode::Char('r') => self.refresh_data(),
             KeyCode::Char('s') => self.start_scan(),
             KeyCode::Char('c') => self.cancel_scan(),
+            KeyCode::Char('x') => self.start_cleanup(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             _ => {}
         }
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        match self.active_tab {
+            Tab::Apps => {
+                let i = match self.apps_table_state.selected() {
+                    Some(i) => {
+                        let total = self.apps.len();
+                        if total == 0 { 0 }
+                        else { (i as i32 + delta).rem_euclid(total as i32) as usize }
+                    }
+                    None => 0,
+                };
+                self.apps_table_state.select(Some(i));
+            }
+            Tab::Duplicates => {
+                let i = match self.dups_table_state.selected() {
+                    Some(i) => {
+                        let total = self.duplicates.len();
+                        if total == 0 { 0 }
+                        else { (i as i32 + delta).rem_euclid(total as i32) as usize }
+                    }
+                    None => 0,
+                };
+                self.dups_table_state.select(Some(i));
+            }
+            _ => {}
+        }
+    }
+
+    fn start_cleanup(&mut self) {
+        if matches!(self.scan_status, ScanStatus::Cleaning { .. }) || self.duplicates.is_empty() {
+            return;
+        }
+
+        // For now, let's clean the selected duplicate group (all but the first path)
+        let selected_idx = self.dups_table_state.selected().unwrap_or(0);
+        if selected_idx >= self.duplicates.len() {
+            return;
+        }
+
+        let group = &self.duplicates[selected_idx];
+        let mut actions = Vec::new();
+        
+        // Keep the first one, delete the rest
+        for path in group.paths.iter().skip(1) {
+            actions.push(CleanAction::new_delete(
+                path.clone(),
+                group.file_size,
+                FileCategory::Duplicate,
+                format!("Duplicate of {}", group.paths[0].display())
+            ));
+        }
+
+        if actions.is_empty() { return; }
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.scan_rx = Some(rx);
+        self.scan_status = ScanStatus::Cleaning {
+            action_index: 0,
+            total_actions: actions.len(),
+            current_path: String::new(),
+            bytes_freed: 0,
+        };
+
+        tokio::spawn(async move {
+            let _ = cleaner::execute_cleanup(&mut actions, false, Some(tx)).await;
+        });
     }
 
     fn on_tick(&mut self) {
@@ -172,6 +258,7 @@ impl App {
 
     fn update_scan_status(&mut self) {
         let mut completed = false;
+        let mut should_refresh = false;
         let rx = match &mut self.scan_rx {
             Some(rx) => rx,
             None => return,
@@ -201,14 +288,36 @@ impl App {
                         duration: Duration::from_millis(duration_ms),
                     };
                     
+                    // Perform analysis and categorization
+                    let analyzer = Analyzer::with_rules(self.config.thresholds.clone(), self.config.general.custom_rules_dir.clone());
+                    let mut analyzed_res = res.clone();
+                    analyzer.analyze(&mut analyzed_res);
+
                     // Compute duplicates if hashing was enabled
                     if self.config.scanner.enable_hashing {
-                        if let Ok(groups) = scoparius_core::analyzer::duplicates::find_duplicates(&res.entries, 1024 * 1024, None) {
+                        if let Ok(groups) = scoparius_core::analyzer::duplicates::find_duplicates(&analyzed_res.entries, 1024 * 1024, None) {
                             self.duplicates = groups;
                         }
                     }
                     
-                    self.last_scan_result = Some(res);
+                    self.last_scan_result = Some(analyzed_res);
+                    completed = true;
+                }
+                ProgressEvent::CleanProgress { action_index, total_actions, current_path, bytes_freed } => {
+                    self.scan_status = ScanStatus::Cleaning {
+                        action_index,
+                        total_actions,
+                        current_path: current_path.to_string_lossy().to_string(),
+                        bytes_freed,
+                    };
+                }
+                ProgressEvent::CleanCompleted { total_freed, .. } => {
+                    self.scan_status = ScanStatus::Completed {
+                        total_files: 0, // Placeholder
+                        total_size: total_freed,
+                        duration: Duration::from_secs(0),
+                    };
+                    should_refresh = true;
                     completed = true;
                 }
                 ProgressEvent::ScanError { path, error } => {
@@ -222,6 +331,10 @@ impl App {
         if completed {
             self.scan_rx = None;
             self.cancel_handle = None;
+        }
+
+        if should_refresh {
+            self.refresh_data();
         }
     }
 

@@ -105,14 +105,16 @@ impl Scanner {
             result.entries.extend(entries);
         }
 
-        // Pass 2: Optional Content Hashing
         if self.config.enable_hashing {
             self.perform_hashing(&mut result, &progress_tx).await?;
         }
 
-        result.total_files = files_count.load(Ordering::Relaxed);
-        result.total_dirs = dirs_count.load(Ordering::Relaxed);
-        result.total_size = bytes_count.load(Ordering::Relaxed);
+        // Pass 3: Platform-Specific Analysis (Registry, Orphans)
+        self.perform_platform_analysis(&mut result, &progress_tx).await?;
+
+        result.total_files = result.entries.iter().filter(|e| !e.is_dir).count() as u64;
+        result.total_dirs = result.entries.iter().filter(|e| e.is_dir).count() as u64;
+        result.total_size = result.entries.iter().map(|e| e.size).sum();
         result.error_count = error_count.load(Ordering::Relaxed);
         result.completed_at = Some(Utc::now());
 
@@ -302,6 +304,43 @@ impl Scanner {
                         current_path: entry.path.clone(),
                     });
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn perform_platform_analysis(
+        &self,
+        result: &mut ScanResult,
+        _progress_tx: &Option<mpsc::UnboundedSender<ProgressEvent>>,
+    ) -> Result<()> {
+        #[cfg(windows)]
+        {
+            tracing::info!("Running registry analysis...");
+            let orphaned_keys = crate::analyzer::registry::find_orphaned_keys();
+            tracing::info!("Found {} orphaned registry keys", orphaned_keys.len());
+            result.entries.extend(orphaned_keys);
+        }
+
+        // Orphaned data analysis requires installed apps list
+        let adapter = crate::platform::create_adapter();
+        if let Ok(apps) = adapter.list_installed_apps() {
+            let data_dirs = crate::analyzer::orphans::app_data_directories();
+            let orphaned_data = crate::analyzer::orphans::find_orphaned_data(&apps, &data_dirs);
+            
+            for orphan in orphaned_data {
+                result.entries.push(FileEntry {
+                    path: orphan.path,
+                    size: orphan.size,
+                    is_dir: true,
+                    modified: None,
+                    accessed: None,
+                    created: None,
+                    content_hash: None,
+                    category: Some(crate::models::FileCategory::OrphanedAppData),
+                    risk: crate::models::RiskLevel::Medium,
+                });
             }
         }
 
